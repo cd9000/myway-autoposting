@@ -1,0 +1,25 @@
+digraph S {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=12, nodesep=0.7, ranksep=0.9, pad=0.3, bgcolor=white,
+         label="Жизненный цикл поста (posts.status)", labelloc=t, fontsize=16];
+  node [shape=box, style="rounded,filled", fillcolor="#EEF2FF", color="#4F46E5", fontname="DejaVu Sans", fontsize=13, margin="0.25,0.12"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#374151", fontcolor="#111827"];
+  start [shape=circle, label="", width=0.22, style=filled, fillcolor=black, color=black];
+  end [shape=doublecircle, label="", width=0.18, style=filled, fillcolor=black, color=black];
+  draft; approved; publishing; published [fillcolor="#DCFCE7", color="#16A34A"];
+  overdue [fillcolor="#FEF3C7", color="#D97706"];
+  failed [fillcolor="#FEE2E2", color="#DC2626"];
+  cancelled [fillcolor="#F3F4F6", color="#6B7280"];
+  start -> draft [label="черновик принят\n(ФТ-04)"];
+  draft -> approved [label="найден свободный слот\nили «В ближайший слот»"];
+  draft -> cancelled [label="«Отменить» / «Удалить»"];
+  approved -> cancelled [label="«Отменить»\n[scheduled_at > now]"];
+  approved -> publishing [label="[scheduled_at ≤ now]\nFOR UPDATE SKIP LOCKED"];
+  approved -> overdue [taillabel="[опоздание\n> 30 мин]  ", labelangle=35, labeldistance=4.5];
+  overdue -> approved [taillabel="  автор перенёс\n  дату", labelangle=-40, labeldistance=4.5];
+  publishing -> published [label="Telegram: ok\n/ сохранить message_id"];
+  publishing -> approved [label="ошибка [attempts < 3]"];
+  publishing -> failed [label="ошибка [attempts = 3]\n/ уведомить автора"];
+  published -> end; cancelled -> end; failed -> end;
+  {rank=same; approved; overdue}
+  {rank=same; published; failed}
+}

@@ -41,11 +41,15 @@
 | User Stories, модель данных, правила, НФТ (MVP-1) | [docs/requirements/mvp1-requirements.md](docs/requirements/mvp1-requirements.md) |
 | Схема БД (PostgreSQL DDL) | [db/schema.sql](db/schema.sql) |
 | Сценарии n8n и ИИ-автор | [docs/n8n-workflows.md](docs/n8n-workflows.md) |
+| ЧТЗ на подсистему черновиков (26 ФТ, 6 НФТ) | [docs/requirements/tz-drafts.md](docs/requirements/tz-drafts.md) |
+| UML: Use Case + матрица прав, диаграмма состояний, 2 диаграммы последовательности | [docs/uml](docs/uml) |
+| API приёма черновиков: OpenAPI 3.0 + коллекция Postman | [docs/api](docs/api) |
+| Тест-кейсы (26) и протокол приёмки с 2 найденными и исправленными дефектами | [docs/testing](docs/testing) |
 
 ## Стек
 
-n8n Cloud · PostgreSQL (Neon) · Telegram Bot API · Claude (ИИ-автор, MCP) · draw.io · Notion (бэклог и документация)
+n8n Cloud · PostgreSQL (Neon) · Telegram Bot API · Claude (ИИ-автор, MCP) · draw.io · Mermaid · Graphviz · OpenAPI / Postman · Notion (бэклог и документация)
 
 ## Навыки, которые демонстрирует проект
 
-Интервью с заказчиком и сбор требований · BPMN 2.0 (AS IS / TO BE) · выявление узких мест · User Stories и критерии приёмки (Given/When/Then) · функциональные и нефункциональные требования · проектирование БД и жизненного цикла статусов · интеграция с REST API (Telegram Bot API) · обработка ошибок и мониторинг · миграция с legacy-системы без простоя
+Интервью с заказчиком и сбор требований · BPMN 2.0 (AS IS / TO BE) · выявление узких мест · User Stories и критерии приёмки (Given/When/Then) · функциональные и нефункциональные требования · проектирование БД и жизненного цикла статусов · интеграция с REST API (Telegram Bot API) · обработка ошибок и мониторинг · миграция с legacy-системы без простоя · ЧТЗ · UML (Use Case, State, Sequence) · матрица прав · проектирование API (OpenAPI) · Postman · тест-кейсы, приёмка, работа с дефектами

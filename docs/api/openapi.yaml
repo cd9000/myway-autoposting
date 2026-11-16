@@ -1,0 +1,167 @@
+openapi: 3.0.3
+info:
+  title: MyWay · API приёма черновиков
+  version: 1.0.0
+  description: |
+    Вход в подсистему черновиков автопостинга MyWay (см. ЧТЗ docs/requirements/tz-drafts.md).
+    Реализован как Webhook-узел n8n в сценарии «MyWay · Приём черновиков v2 (с картинками)».
+
+    **Как обрабатывается запрос.** Webhook отвечает сразу, до обработки (режим n8n «Respond immediately»),
+    поэтому ответ 200 означает «запрос принят», а не «черновик сохранён». Результат обработки автор
+    видит в Telegram (превью поста), а ИИ-автор проверяет статус запуска сценария через n8n.
+
+    **Текущее состояние.** Сценарий не опубликован: вызывается ручным запуском через авторизованный
+    MCP-доступ к n8n с тем же телом запроса. Публичный адрес и заголовок `X-API-Key` — план (НФТ-05).
+  contact:
+    name: MyWay
+    url: https://github.com/cd9000/myway-autoposting
+servers:
+  - url: https://{n8nHost}/webhook
+    description: Боевой адрес (после публикации сценария)
+    variables:
+      n8nHost:
+        default: N8N_HOST
+        description: Хост инстанса n8n Cloud (в репозитории не публикуется)
+  - url: https://{n8nHost}/webhook-test
+    description: Тестовый адрес n8n (работает, пока в редакторе нажато «Listen for test event»)
+    variables:
+      n8nHost:
+        default: N8N_HOST
+tags:
+  - name: Черновики
+    description: Приём черновиков постов от ИИ-автора
+paths:
+  /myway-drafts-v2:
+    post:
+      tags: [Черновики]
+      operationId: submitDrafts
+      summary: Передать черновики постов
+      description: |
+        Принимает от 1 до 10 черновиков. Для каждого черновика система:
+        1. сохраняет его со статусом `draft` (ФТ-04);
+        2. ищет ближайший свободный день и назначает слот: `news` — 12:00 МСК в пределах 2 дней,
+           `plan`/`manual` — 19:05 МСК в пределах 14 дней, не раньше чем через 60 минут (ФТ-06 – ФТ-10);
+        3. генерирует иллюстрацию по `image_prompt` (ФТ-11 – ФТ-14);
+        4. присылает автору превью с кнопкой «Отменить» либо, если слота нет, с кнопками
+           «В ближайший слот» / «Удалить» (ФТ-16, ФТ-17).
+
+        Черновики без `body` пропускаются без ошибки (ФТ-02). Неизвестный `type` заменяется на `news` (ФТ-03).
+
+        Ограничения схемы (не больше 10 черновиков, длина полей) сейчас соблюдает клиент; сценарий проверяет
+        только наличие `body`. Валидация по схеме на стороне n8n с ответом 400 — в плане доработок.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftsRequest'
+            examples:
+              news:
+                summary: Одна новость с иллюстрацией
+                value:
+                  drafts:
+                    - type: news
+                      body: |-
+                        ЦБ сохранил ключевую ставку. Что это значит для вкладов
+
+                        Короткий разбор решения и практический вывод для читателя.
+                      source_url: https://cbr.ru/press/keypr/
+                      image_prompt: a calm central bank building at dusk with a soft glowing percent sign above it, editorial illustration
+              plan_without_image:
+                summary: Плановый пост без описания картинки
+                value:
+                  drafts:
+                    - type: plan
+                      body: |-
+                        Как я веду учёт расходов за 10 минут в неделю
+
+                        Три шага, которые работают у меня уже год.
+      responses:
+        '200':
+          description: Запрос принят, обработка запущена асинхронно
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+              example:
+                message: Workflow got started.
+        '401':
+          description: 'План (НФТ-05): нет или неверный заголовок X-API-Key'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: 401
+                message: Authorization data is wrong!
+        '404':
+          description: Сценарий не опубликован (боевой адрес) или тестовый адрес не слушает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: 404
+                message: The requested webhook "POST myway-drafts-v2" is not registered.
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 'План (НФТ-05): ключ хранится в Credentials n8n (Header Auth) и в настройках ИИ-автора.'
+  schemas:
+    DraftsRequest:
+      type: object
+      required: [drafts]
+      additionalProperties: false
+      properties:
+        drafts:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Draft'
+    Draft:
+      type: object
+      required: [body]
+      properties:
+        type:
+          type: string
+          enum: [news, plan, manual]
+          default: news
+          description: |
+            Тип поста, определяет слот: `news` — 12:00 МСК, горизонт 2 дня;
+            `plan` и `manual` — 19:05 МСК, горизонт 14 дней.
+        body:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: |
+            Текст поста (HTML-разметка Telegram). Первая строка — заголовок до 120 знаков (на Дзене станет названием).
+            Для поста с фото-подписью — до 1000 знаков; ИИ-автор пишет до 950 (ФТ-25).
+            Длиннее 1000 знаков пост выйдет текстом с превью картинки (ФТ-15).
+        source_url:
+          type: string
+          format: uri
+          description: Ссылка на главный источник; пустая строка сохраняется как NULL.
+        image_prompt:
+          type: string
+          maxLength: 500
+          description: |
+            Описание иллюстрации на английском, 1–2 предложения, без текста и логотипов на картинке.
+            Пусто — нейтральная иллюстрация о личных финансах.
+    Accepted:
+      type: object
+      properties:
+        message:
+          type: string
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string

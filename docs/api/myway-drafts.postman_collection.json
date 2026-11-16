@@ -1,0 +1,301 @@
+{
+  "info": {
+    "_postman_id": "23440e00-3b65-524d-b390-2dd890c1e181",
+    "name": "MyWay · API приёма черновиков",
+    "description": "Коллекция к docs/api/openapi.yaml. Задайте переменные n8nHost и apiKey в окружении Postman (в репозитории не хранятся). После прогона отмените тестовые посты кнопкой «Отменить» в Telegram.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "TC-API-01 Новость с иллюстрацией",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"Запрос принят в обработку\", function () { pm.expect(pm.response.json().message).to.match(/started/i); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "description": "Ожидание: 200; в БД пост approved на 12:00 МСК в пределах 2 дней; автору пришло фото-превью с кнопкой «Отменить»; заполнены photo_file_id и image_url.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"news\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить»\\n\\nНовость: проверка приёма, автопланирования на 12:00 и генерации картинки.\",\n      \"source_url\": \"https://cbr.ru/\",\n      \"image_prompt\": \"a glass piggy bank with coins on a wooden desk, warm morning light\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TC-API-02 Плановый пост без image_prompt",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"Запрос принят в обработку\", function () { pm.expect(pm.response.json().message).to.match(/started/i); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "description": "Ожидание: 200; слот 19:05 МСК в пределах 14 дней; нейтральная иллюстрация.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"plan\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить»\\n\\nПлановый пост без описания картинки.\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TC-API-03 Пакет из двух черновиков",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"Запрос принят в обработку\", function () { pm.expect(pm.response.json().message).to.match(/started/i); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "description": "Ожидание: 200; два поста на разные свободные дни (не больше 1 поста в день).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"plan\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить» (1 из 2)\"\n    },\n    {\n      \"type\": \"plan\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить» (2 из 2)\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TC-API-04 Черновик без body пропускается",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"Запрос принят в обработку\", function () { pm.expect(pm.response.json().message).to.match(/started/i); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "description": "Ожидание: 200; в БД новых постов нет, автору ничего не приходит (ФТ-02).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"news\",\n      \"image_prompt\": \"test\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TC-API-05 Неизвестный type заменяется на news",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"Запрос принят в обработку\", function () { pm.expect(pm.response.json().message).to.match(/started/i); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "description": "Ожидание: 200; пост сохранён с type = news, слот 12:00 (ФТ-03).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"story\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить»\\n\\nНеизвестный тип.\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TC-API-06 Запрос без X-API-Key (план, НФТ-05)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 401\", function () { pm.response.to.have.status(401); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "description": "После включения авторизации ожидается 401. Сейчас авторизация не включена — кейс помечен как план.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"drafts\": [\n    {\n      \"type\": \"plan\",\n      \"body\": \"ТЕСТ — отменить кнопкой «Отменить»\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/myway-drafts-v2",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "myway-drafts-v2"
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "n8nHost",
+      "value": "N8N_HOST"
+    },
+    {
+      "key": "baseUrl",
+      "value": "https://{{n8nHost}}/webhook-test"
+    },
+    {
+      "key": "apiKey",
+      "value": ""
+    }
+  ]
+}

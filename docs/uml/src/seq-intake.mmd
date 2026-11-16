@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    participant AI as ИИ-автор (Claude)
+    participant SRC as Публичные каналы
+    participant N as n8n (SQL-консоль, Приём, Пульт)
+    participant DB as PostgreSQL
+    participant IMG as Pollinations
+    participant TG as Telegram Bot API
+    actor A as Автор канала
+    AI->>N: SQL-консоль: SELECT очереди на 7 дней
+    N->>DB: SELECT posts
+    DB-->>AI: свободные дни, темы за 10 дней
+    alt неделя заполнена
+        AI-->>AI: черновик не готовится
+    else есть свободный день
+        AI->>SRC: просмотры постов за 24–48 ч, проверка фактов
+        AI->>N: POST /webhook/myway-drafts-v2 {drafts: [type, body, source_url, image_prompt]}
+        N-->>AI: 200 «Workflow got started»
+        N->>DB: INSERT posts (status = draft)
+        N->>DB: найти свободный слот, status = approved
+        N->>IMG: GET /prompt/{image_prompt]}?seed={id}
+        alt картинка получена
+            IMG-->>N: image/jpeg
+            N->>TG: sendPhoto (превью + кнопка «Отменить»)
+            TG-->>N: file_id
+            N->>DB: UPDATE photo_file_id, image_url
+        else сбой генерации
+            N->>TG: sendMessage (превью без картинки)
+        end
+        TG->>A: превью поста
+        opt автор не согласен
+            A->>TG: нажимает «🚫 Отменить»
+            TG->>N: callback_query del:{id} (сценарий «Пульт»)
+            N->>DB: UPDATE status = cancelled, если ещё не опубликован
+            N->>TG: answerCallbackQuery + «Пост отменён»
+        end
+    end

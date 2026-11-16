@@ -1,0 +1,37 @@
+sequenceDiagram
+    autonumber
+    participant T as Таймер (каждые 5 мин)
+    participant N as n8n: Публикатор
+    participant DB as PostgreSQL
+    participant TG as Telegram Bot API
+    participant Z as Дзен (кросспостинг)
+    actor A as Автор канала
+    T->>N: запуск
+    N->>DB: approved и опоздание > 30 мин → overdue
+    opt есть просроченные
+        N->>TG: уведомление автору
+    end
+    N->>DB: взять 1 пост: approved, scheduled_at ≤ now()<br/>FOR UPDATE SKIP LOCKED → publishing, attempts + 1
+    alt постов нет
+        DB-->>N: 0 строк → конец
+    else пост взят
+        alt есть фото и текст ≤ 1000 знаков
+            N->>TG: sendPhoto(file_id, caption)
+        else есть image_url
+            N->>TG: sendMessage(скрытая ссылка на картинку + текст)
+        else
+            N->>TG: sendMessage(текст)
+        end
+        alt Telegram ok
+            TG-->>N: message_id
+            N->>DB: published, tg_message_id, publish_log(ok)
+            TG-)Z: кросспостинг в Дзен
+        else ошибка
+            TG-->>N: error
+            N->>DB: publish_log(error), approved или failed
+            opt attempts = 3
+                N->>TG: «Пост не опубликован» автору
+                TG->>A: уведомление
+            end
+        end
+    end
