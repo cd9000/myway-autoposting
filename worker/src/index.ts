@@ -163,14 +163,15 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       const seed = Math.floor(Math.random() * 100000)
       const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1280&height=720&model=flux&nologo=true&seed=${seed}`
       await sql`UPDATE posts SET image_url = ${imageUrl}, updated_at = NOW() WHERE id = ${id}`
+      const sceneText = truncate(prompt.replace(IMAGE_STYLE, ''), 500)
       try {
         await tgApi(env, 'sendPhoto', {
           chat_id: chatId,
           photo: imageUrl,
-          caption: `Новая картинка поста #${id}. Не нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
+          caption: `Новая картинка поста #${id}\nСцена: ${sceneText}\n\nНе нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
         })
       } catch {
-        await reply(env, chatId, `Картинка поста #${id} обновлена (превью не удалось загрузить — посмотрите через /post ${id}).`)
+        await reply(env, chatId, `Картинка поста #${id} обновлена.\nСцена: ${sceneText}\nПревью не удалось загрузить — посмотрите через /post ${id}.`)
       }
       return
     }
