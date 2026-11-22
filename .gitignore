@@ -5,3 +5,5 @@ bridge/config.json
 bridge/state.json
 bridge/bridge.log
 bridge/bridge-hidden.vbs
+generator/generator.log
+generator/generator-hidden.vbs
