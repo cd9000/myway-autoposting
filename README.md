@@ -32,6 +32,19 @@
 
 ![TO BE](docs/bpmn/to_be.png)
 
+## Эволюция: serverless и AI-агент
+
+Второй этап — переход от low-code к собственной serverless-архитектуре и добавление двустороннего AI-ассистента:
+
+| Компонент | Что делает |
+| --- | --- |
+| Публикатор на Cloudflare Workers | Cron каждые 15 мин публикует одобренные посты точно по расписанию (проверено в продакшене: отклонение — секунды); 3 попытки при сбое с эскалацией администратору |
+| Админ-команды в боте | /status, /queue, /post, /approve, /cancel — управление очередью из Telegram; webhook защищён секрет-токеном, доступ только по ID администратора |
+| Мост Telegram ↔ AI-агент | Сообщение автора → очередь `agent_inbox` в Postgres → локальный LLM-агент (Qwen Code) с постоянным контекстом переписки → ответ в Telegram; зависшие задачи возвращаются в обработку |
+| Автозапуск агента | Скрытый запуск при входе в Windows через Task Scheduler; мост работает без участия пользователя |
+
+Код: [worker](worker) (TypeScript, Hono), [bridge](bridge) (Node.js), [setup](setup) (скрипты установки). Секреты в репозиторий не попадают: `.gitignore` + `config.example.json`.
+
 ## Артефакты
 
 | Артефакт | Файл |
@@ -48,8 +61,8 @@
 
 ## Стек
 
-n8n Cloud · PostgreSQL (Neon) · Telegram Bot API · Claude (ИИ-автор, MCP) · draw.io · Mermaid · Graphviz · OpenAPI / Postman · Notion (бэклог и документация)
+n8n Cloud · Cloudflare Workers (TypeScript, Hono, Wrangler, cron) · PostgreSQL (Neon) · Telegram Bot API · Claude (ИИ-автор, MCP) · Qwen Code (LLM-агент) · Node.js · PowerShell / Windows Task Scheduler · draw.io · Mermaid · Graphviz · OpenAPI / Postman · Notion (бэклог и документация)
 
 ## Навыки, которые демонстрирует проект
 
-Интервью с заказчиком и сбор требований · BPMN 2.0 (AS IS / TO BE) · выявление узких мест · User Stories и критерии приёмки (Given/When/Then) · функциональные и нефункциональные требования · проектирование БД и жизненного цикла статусов · интеграция с REST API (Telegram Bot API) · обработка ошибок и мониторинг · миграция с legacy-системы без простоя · ЧТЗ · UML (Use Case, State, Sequence) · матрица прав · проектирование API (OpenAPI) · Postman · тест-кейсы, приёмка, работа с дефектами
+Интервью с заказчиком и сбор требований · BPMN 2.0 (AS IS / TO BE) · выявление узких мест · User Stories и критерии приёмки (Given/When/Then) · функциональные и нефункциональные требования · проектирование БД и жизненного цикла статусов · интеграция с REST API (Telegram Bot API) · обработка ошибок и мониторинг · миграция с legacy-системы без простоя · ЧТЗ · UML (Use Case, State, Sequence) · матрица прав · проектирование API (OpenAPI) · Postman · тест-кейсы, приёмка, работа с дефектами · serverless-архитектура (Cloudflare Workers, cron) · очереди сообщений (producer–consumer, reclaim зависших задач) · безопасность интеграций (секрет webhook, Bearer, ролевой доступ) · интеграция LLM-агента в мессенджер с постоянным контекстом
