@@ -22,6 +22,7 @@ type DraftInput = {
   type?: string
   body?: string
   source_url?: string
+  image_url?: string
   scheduled_at?: string
 }
 
@@ -32,7 +33,10 @@ const HELP = [
   '/post <id> — детали поста',
   '/approve <id> — одобрить пост',
   '/cancel <id> — отменить пост',
+  '/redo <id> [описание] — новая картинка поста',
 ].join('\n')
+
+const IMAGE_STYLE = ', clean modern editorial illustration, calm daylight, no text, no letters'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -130,6 +134,47 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       return
     }
 
+    case '/redo': {
+      const parts = text.trim().split(/\s+/)
+      const id = parseId(parts[1])
+      if (id === null) {
+        await reply(env, chatId, 'Использование: /redo <id> [описание сцены]')
+        return
+      }
+      const rows = await sql`SELECT id, body, image_url FROM posts WHERE id = ${id}`
+      if (rows.length === 0) {
+        await reply(env, chatId, `Пост #${id} не найден.`)
+        return
+      }
+      const post = rows[0]
+      const scene = parts.slice(2).join(' ')
+      let prompt: string
+      if (scene) {
+        prompt = scene + IMAGE_STYLE
+      } else if (post.image_url) {
+        try {
+          prompt = decodeURIComponent(new URL(post.image_url).pathname.replace(/^\/prompt\//, ''))
+        } catch {
+          prompt = post.body.slice(0, 200) + IMAGE_STYLE
+        }
+      } else {
+        prompt = post.body.slice(0, 200) + IMAGE_STYLE
+      }
+      const seed = Math.floor(Math.random() * 100000)
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1280&height=720&model=flux&nologo=true&seed=${seed}`
+      await sql`UPDATE posts SET image_url = ${imageUrl}, updated_at = NOW() WHERE id = ${id}`
+      try {
+        await tgApi(env, 'sendPhoto', {
+          chat_id: chatId,
+          photo: imageUrl,
+          caption: `Новая картинка поста #${id}. Не нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
+        })
+      } catch {
+        await reply(env, chatId, `Картинка поста #${id} обновлена (превью не удалось загрузить — посмотрите через /post ${id}).`)
+      }
+      return
+    }
+
     case '/approve':
     case '/cancel': {
       const id = parseId(arg)
@@ -202,6 +247,7 @@ app.post('/ai/drafts', async (c) => {
 
   const sql = neon(c.env.NEON_DATABASE_URL)
   let inserted = 0
+  const ids: number[] = []
   for (const draft of drafts) {
     if (typeof draft.body !== 'string' || draft.body.trim() === '') continue
     let scheduledAt: string | null = null
@@ -212,12 +258,53 @@ app.post('/ai/drafts', async (c) => {
       }
       scheduledAt = date.toISOString()
     }
-    await sql`
-      INSERT INTO posts (type, body, source_url, scheduled_at, status)
-      VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${scheduledAt}, 'draft')`
+    const rows = await sql`
+      INSERT INTO posts (type, body, source_url, image_url, scheduled_at, status)
+      VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${draft.image_url ?? null}, ${scheduledAt}, 'draft')
+      RETURNING id`
     inserted++
+    ids.push(Number(rows[0].id))
   }
-  return c.json({ ok: true, inserted })
+  return c.json({ ok: true, inserted, ids })
+})
+
+app.get('/ai/schedule', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    SELECT id, status, scheduled_at
+    FROM posts
+    WHERE status IN ('draft', 'approved') AND scheduled_at > NOW()
+    ORDER BY scheduled_at ASC`
+  return c.json({ posts: rows })
+})
+
+app.get('/ai/post/:id', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id)) return c.json({ error: 'invalid id' }, 400)
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    SELECT id, type, body, status, scheduled_at, source_url
+    FROM posts WHERE id = ${id}`
+  if (rows.length === 0) return c.json({ error: 'not found' }, 404)
+  return c.json({ post: rows[0] })
+})
+
+app.post('/ai/notify', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const body = await c.req.json<{ text?: string }>().catch(() => null)
+  if (!body?.text) return c.json({ error: 'text required' }, 400)
+  for (const chunk of splitMessage(body.text)) {
+    await tgApi(c.env, 'sendMessage', { chat_id: Number(c.env.ADMIN_TELEGRAM_ID), text: chunk })
+  }
+  return c.json({ ok: true })
 })
 
 function splitMessage(text: string, max = 4096): string[] {

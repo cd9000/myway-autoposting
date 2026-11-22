@@ -104,8 +104,9 @@ const PROMPT = `Ты — автор Telegram-канала о личных фин
 1. Через WebFetch посмотри свежие новости (за последние 1-2 дня) на https://www.rbc.ru/economics/ и https://www.banki.ru/news/lenta/ — выбери 2 РАЗНЫЕ новости, важные для личных финансов россиян (вклады, кредиты, ипотека, налоги, пенсии, экономика).
 2. Напиши по каждой пост на 500-900 символов: суть новости + что это значит для читателя. Без заголовков-кликбейта, без HTML.
 3. Для каждой новости укажи source_url — прямую ссылку на страницу новости (не главную страницу сайта).
-4. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
-{"drafts":[{"body":"текст поста 1","source_url":"https://..."},{"body":"текст поста 2","source_url":"https://..."}]}`
+4. Для каждого поста составь image_prompt — краткую выжимку сути поста как визуальную сцену на английском (1-2 предложения, без названий и брендов). Пример: "a glass piggy bank full of coins on a conveyor belt between two bank buildings, paperwork and rubber stamps".
+5. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
+{"drafts":[{"body":"текст поста 1","source_url":"https://...","image_prompt":"scene description"},{"body":"текст поста 2","source_url":"https://...","image_prompt":"scene description"}]}`
 
 async function main() {
   const { posts } = await api('/ai/schedule')
@@ -123,7 +124,12 @@ async function main() {
   const payload = drafts.slice(0, 2).map((d, i) => {
     const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
     const body = source && !d.body.includes(source) ? `${d.body}\n\nИсточник: ${source}` : d.body
-    return { type: 'news', body, source_url: source, scheduled_at: slots[i] }
+    const scene = typeof d.image_prompt === 'string' && d.image_prompt.trim()
+      ? d.image_prompt.trim()
+      : d.body.slice(0, 200)
+    const prompt = `${scene}, clean modern editorial illustration, calm daylight, no text, no letters`
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1280&height=720&model=flux&nologo=true&seed=${Date.now() % 100000 + i}`
+    return { type: 'news', body, source_url: source, image_url: imageUrl, scheduled_at: slots[i] }
   })
   let result
   try {
