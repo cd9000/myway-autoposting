@@ -103,8 +103,9 @@ const PROMPT = `Ты — автор Telegram-канала о личных фин
 Задача:
 1. Через WebFetch посмотри свежие новости (за последние 1-2 дня) на https://www.rbc.ru/economics/ и https://www.banki.ru/news/lenta/ — выбери 2 РАЗНЫЕ новости, важные для личных финансов россиян (вклады, кредиты, ипотека, налоги, пенсии, экономика).
 2. Напиши по каждой пост на 500-900 символов: суть новости + что это значит для читателя. Без заголовков-кликбейта, без HTML.
-3. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
-{"drafts":[{"body":"текст поста 1"},{"body":"текст поста 2"}]}`
+3. Для каждой новости укажи source_url — прямую ссылку на страницу новости (не главную страницу сайта).
+4. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
+{"drafts":[{"body":"текст поста 1","source_url":"https://..."},{"body":"текст поста 2","source_url":"https://..."}]}`
 
 async function main() {
   const { posts } = await api('/ai/schedule')
@@ -119,11 +120,11 @@ async function main() {
   const drafts = parseDrafts(output)
   if (drafts.length === 0) throw new Error('no valid drafts generated')
 
-  const payload = drafts.slice(0, 2).map((d, i) => ({
-    type: 'news',
-    body: d.body,
-    scheduled_at: slots[i],
-  }))
+  const payload = drafts.slice(0, 2).map((d, i) => {
+    const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
+    const body = source && !d.body.includes(source) ? `${d.body}\n\nИсточник: ${source}` : d.body
+    return { type: 'news', body, source_url: source, scheduled_at: slots[i] }
+  })
   let result
   try {
     result = await api('/ai/drafts', { drafts: payload })
