@@ -34,6 +34,7 @@ const HELP = [
   '/approve <id> — одобрить пост',
   '/cancel <id> — отменить пост',
   '/redo <id> [описание] — новая картинка поста',
+  'Кнопки под строкой ввода дублируют основные команды.',
 ].join('\n')
 
 const IMAGE_STYLE = ', clean modern editorial illustration, calm daylight, no text, no letters'
@@ -48,8 +49,30 @@ function tgApi(env: Env, method: string, payload: Record<string, unknown>) {
   })
 }
 
-function reply(env: Env, chatId: number, text: string) {
-  return tgApi(env, 'sendMessage', { chat_id: chatId, text })
+function reply(env: Env, chatId: number, text: string, markup?: Record<string, unknown>) {
+  return tgApi(env, 'sendMessage', {
+    chat_id: chatId,
+    text,
+    ...(markup ? { reply_markup: markup } : {}),
+  })
+}
+
+const KEYBOARD = {
+  keyboard: [
+    ['📋 Запланированные посты'],
+    ['🖼 Картинки', '🆕 Черновики'],
+    ['📊 Статус', '❓ Помощь'],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+}
+
+const BUTTON_COMMANDS: Record<string, string> = {
+  '📋 Запланированные посты': '/queue',
+  '🖼 Картинки': '/pictures',
+  '🆕 Черновики': '/drafts',
+  '📊 Статус': '/status',
+  '❓ Помощь': '/start',
 }
 
 function truncate(text: string, max: number) {
@@ -67,11 +90,12 @@ function parseId(arg: string | undefined) {
 
 async function handleCommand(env: Env, chatId: number, text: string) {
   const sql = neon(env.NEON_DATABASE_URL)
-  const [command, arg] = text.trim().split(/\s+/)
+  const normalized = BUTTON_COMMANDS[text.trim()] ?? text
+  const [command, arg] = normalized.trim().split(/\s+/)
 
   switch (command) {
     case '/start':
-      await reply(env, chatId, 'Привет! Бот работает.\n\n' + HELP)
+      await reply(env, chatId, 'Привет! Бот работает.\n\n' + HELP, KEYBOARD)
       return
 
     case '/status': {
@@ -99,6 +123,47 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       const lines = rows.map(
         (row) =>
           `#${row.id} [${row.status}] ${formatMoment(row.scheduled_at)}\n${truncate(row.body, 80)}`,
+      )
+      await reply(env, chatId, truncate(lines.join('\n\n'), 4096))
+      return
+    }
+
+    case '/pictures': {
+      const rows = await sql`
+        SELECT id, status, scheduled_at, photo_file_id, image_url
+        FROM posts
+        WHERE status IN ('draft', 'approved')
+          AND (photo_file_id IS NOT NULL OR image_url IS NOT NULL)
+        ORDER BY scheduled_at ASC NULLS FIRST
+        LIMIT 3`
+      if (rows.length === 0) {
+        await reply(env, chatId, 'В очереди нет постов с картинками. Добавить: /redo <id>')
+        return
+      }
+      for (const row of rows) {
+        await tgApi(env, 'sendPhoto', {
+          chat_id: chatId,
+          photo: row.photo_file_id || row.image_url,
+          caption: `#${row.id} [${row.status}] ${formatMoment(row.scheduled_at)}\nНовая картинка: /redo ${row.id}`,
+        })
+      }
+      return
+    }
+
+    case '/drafts': {
+      const rows = await sql`
+        SELECT id, scheduled_at, body
+        FROM posts
+        WHERE status = 'draft'
+        ORDER BY scheduled_at ASC NULLS FIRST
+        LIMIT 10`
+      if (rows.length === 0) {
+        await reply(env, chatId, 'Черновиков нет — очередь одобрений пуста.')
+        return
+      }
+      const lines = rows.map(
+        (row) =>
+          `#${row.id} ${formatMoment(row.scheduled_at)}\n${truncate(row.body, 80)}\nОдобрить: /approve ${row.id}`,
       )
       await reply(env, chatId, truncate(lines.join('\n\n'), 4096))
       return
@@ -215,7 +280,7 @@ app.post('/tg', async (c) => {
   }
 
   try {
-    if (message.text.startsWith('/')) {
+    if (message.text.startsWith('/') || BUTTON_COMMANDS[message.text.trim()]) {
       await handleCommand(c.env, message.chat.id, message.text)
     } else {
       const sql = neon(c.env.NEON_DATABASE_URL)
