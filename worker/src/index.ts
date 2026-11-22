@@ -1,0 +1,354 @@
+import { Hono } from 'hono'
+import { neon } from '@neondatabase/serverless'
+
+type Env = {
+  NEON_DATABASE_URL: string
+  TELEGRAM_BOT_TOKEN: string
+  TELEGRAM_WEBHOOK_SECRET: string
+  ADMIN_TELEGRAM_ID: string
+  AI_API_KEY: string
+  TELEGRAM_CHANNEL_ID: string
+}
+
+type TelegramUpdate = {
+  message?: {
+    text?: string
+    chat: { id: number }
+    from?: { id: number }
+  }
+}
+
+type DraftInput = {
+  type?: string
+  body?: string
+  source_url?: string
+  scheduled_at?: string
+}
+
+const HELP = [
+  'Команды:',
+  '/status — статистика постов',
+  '/queue — ближайшие запланированные посты',
+  '/post <id> — детали поста',
+  '/approve <id> — одобрить пост',
+  '/cancel <id> — отменить пост',
+].join('\n')
+
+const app = new Hono<{ Bindings: Env }>()
+
+function tgApi(env: Env, method: string, payload: Record<string, unknown>) {
+  return fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+function reply(env: Env, chatId: number, text: string) {
+  return tgApi(env, 'sendMessage', { chat_id: chatId, text })
+}
+
+function truncate(text: string, max: number) {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
+function formatMoment(value: string | null) {
+  if (!value) return '—'
+  return new Date(value).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+}
+
+function parseId(arg: string | undefined) {
+  return arg && /^\d+$/.test(arg) ? Number(arg) : null
+}
+
+async function handleCommand(env: Env, chatId: number, text: string) {
+  const sql = neon(env.NEON_DATABASE_URL)
+  const [command, arg] = text.trim().split(/\s+/)
+
+  switch (command) {
+    case '/start':
+      await reply(env, chatId, 'Привет! Бот работает.\n\n' + HELP)
+      return
+
+    case '/status': {
+      const rows = await sql`SELECT status, COUNT(*)::int AS count FROM posts GROUP BY status`
+      const counts: Record<string, number> = {}
+      for (const row of rows) counts[row.status] = row.count
+      const lines = ['draft', 'approved', 'published', 'cancelled'].map(
+        (status) => `${status}: ${counts[status] ?? 0}`,
+      )
+      await reply(env, chatId, 'Посты:\n' + lines.join('\n'))
+      return
+    }
+
+    case '/queue': {
+      const rows = await sql`
+        SELECT id, status, scheduled_at, body
+        FROM posts
+        WHERE status IN ('approved', 'draft') AND scheduled_at > NOW()
+        ORDER BY scheduled_at ASC
+        LIMIT 10`
+      if (rows.length === 0) {
+        await reply(env, chatId, 'Очередь пуста.')
+        return
+      }
+      const lines = rows.map(
+        (row) =>
+          `#${row.id} [${row.status}] ${formatMoment(row.scheduled_at)}\n${truncate(row.body, 80)}`,
+      )
+      await reply(env, chatId, truncate(lines.join('\n\n'), 4096))
+      return
+    }
+
+    case '/post': {
+      const id = parseId(arg)
+      if (id === null) {
+        await reply(env, chatId, 'Использование: /post <id>')
+        return
+      }
+      const rows = await sql`
+        SELECT id, type, body, status, scheduled_at, photo_file_id, image_url
+        FROM posts WHERE id = ${id}`
+      if (rows.length === 0) {
+        await reply(env, chatId, `Пост #${id} не найден.`)
+        return
+      }
+      const post = rows[0]
+      const details =
+        `#${post.id} [${post.status}] тип: ${post.type}\n` +
+        `scheduled: ${formatMoment(post.scheduled_at)}\n\n${post.body}`
+      const photo = post.photo_file_id || post.image_url
+      if (photo) {
+        await tgApi(env, 'sendPhoto', {
+          chat_id: chatId,
+          photo,
+          caption: truncate(details, 1024),
+        })
+      } else {
+        await reply(env, chatId, truncate(details, 4096))
+      }
+      return
+    }
+
+    case '/approve':
+    case '/cancel': {
+      const id = parseId(arg)
+      if (id === null) {
+        await reply(env, chatId, `Использование: ${command} <id>`)
+        return
+      }
+      const status = command === '/approve' ? 'approved' : 'cancelled'
+      const rows = await sql`
+        UPDATE posts SET status = ${status}, updated_at = NOW()
+        WHERE id = ${id} RETURNING id`
+      await reply(
+        env,
+        chatId,
+        rows.length > 0 ? `Пост #${id} → ${status}` : `Пост #${id} не найден.`,
+      )
+      return
+    }
+
+    default:
+      await reply(env, chatId, HELP)
+  }
+}
+
+app.get('/', (c) => c.json({ status: 'ok' }))
+
+app.post('/tg', async (c) => {
+  const secret = c.req.header('X-Telegram-Bot-Api-Secret-Token')
+  if (secret !== c.env.TELEGRAM_WEBHOOK_SECRET) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  const update = await c.req.json<TelegramUpdate>()
+  const message = update.message
+  if (!message?.text || String(message.from?.id) !== c.env.ADMIN_TELEGRAM_ID) {
+    return c.json({ ok: true })
+  }
+
+  try {
+    if (message.text.startsWith('/')) {
+      await handleCommand(c.env, message.chat.id, message.text)
+    } else {
+      const sql = neon(c.env.NEON_DATABASE_URL)
+      await sql`
+        INSERT INTO agent_inbox (chat_id, text)
+        VALUES (${message.chat.id}, ${message.text})`
+      await reply(c.env, message.chat.id, 'Принято. Думаю…')
+    }
+  } catch (err) {
+    console.error(err)
+    try {
+      await reply(c.env, message.chat.id, 'Ошибка: ' + (err instanceof Error ? err.message : String(err)))
+    } catch {
+      // Telegram недоступен — ошибка уже залогирована
+    }
+  }
+  return c.json({ ok: true })
+})
+
+app.post('/ai/drafts', async (c) => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AI_API_KEY}`) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  const payload = await c.req.json<{ drafts?: DraftInput[] }>().catch(() => null)
+  const drafts = payload?.drafts
+  if (!Array.isArray(drafts) || drafts.length === 0) {
+    return c.json({ error: 'drafts array required' }, 400)
+  }
+
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  let inserted = 0
+  for (const draft of drafts) {
+    if (typeof draft.body !== 'string' || draft.body.trim() === '') continue
+    let scheduledAt: string | null = null
+    if (draft.scheduled_at) {
+      const date = new Date(draft.scheduled_at)
+      if (Number.isNaN(date.getTime())) {
+        return c.json({ error: `invalid scheduled_at: ${draft.scheduled_at}` }, 400)
+      }
+      scheduledAt = date.toISOString()
+    }
+    await sql`
+      INSERT INTO posts (type, body, source_url, scheduled_at, status)
+      VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${scheduledAt}, 'draft')`
+    inserted++
+  }
+  return c.json({ ok: true, inserted })
+})
+
+function splitMessage(text: string, max = 4096): string[] {
+  const chunks: string[] = []
+  let rest = text
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n', max)
+    if (cut < max / 2) cut = max
+    chunks.push(rest.slice(0, cut))
+    rest = rest.slice(cut)
+  }
+  if (rest.length > 0) chunks.push(rest)
+  return chunks
+}
+
+function agentAuthorized(header: string | undefined, env: Env) {
+  return header === `Bearer ${env.AI_API_KEY}`
+}
+
+app.get('/agent/pending', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    UPDATE agent_inbox SET status = 'processing', processed_at = NOW()
+    WHERE id IN (
+      SELECT id FROM agent_inbox
+      WHERE status = 'pending'
+         OR (status = 'processing' AND processed_at < NOW() - INTERVAL '10 minutes')
+      ORDER BY created_at
+      LIMIT 3
+    )
+    RETURNING id, chat_id, text`
+  return c.json({ messages: rows })
+})
+
+app.post('/agent/reply', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const body = await c.req.json<{ id?: number; text?: string }>().catch(() => null)
+  if (!body?.id || typeof body.text !== 'string') {
+    return c.json({ error: 'id and text required' }, 400)
+  }
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    UPDATE agent_inbox SET status = 'done', reply = ${body.text}, processed_at = NOW()
+    WHERE id = ${body.id} RETURNING chat_id`
+  if (rows.length === 0) return c.json({ error: 'not found' }, 404)
+  for (const chunk of splitMessage(body.text)) {
+    await tgApi(c.env, 'sendMessage', { chat_id: rows[0].chat_id, text: chunk })
+  }
+  return c.json({ ok: true })
+})
+
+app.post('/agent/fail', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const body = await c.req.json<{ id?: number; error?: string }>().catch(() => null)
+  if (!body?.id) return c.json({ error: 'id required' }, 400)
+  const message = truncate(body.error ?? 'unknown error', 500)
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    UPDATE agent_inbox SET status = 'failed', error = ${message}, processed_at = NOW()
+    WHERE id = ${body.id} RETURNING chat_id`
+  if (rows.length === 0) return c.json({ error: 'not found' }, 404)
+  await reply(c.env, rows[0].chat_id, `Не удалось обработать сообщение: ${message}`)
+  return c.json({ ok: true })
+})
+
+const MAX_ATTEMPTS = 3
+
+async function publishDuePosts(env: Env) {
+  const sql = neon(env.NEON_DATABASE_URL)
+  const rows = await sql`
+    SELECT id, body, photo_file_id, image_url
+    FROM posts
+    WHERE status = 'approved' AND attempts < ${MAX_ATTEMPTS}
+      AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+    ORDER BY scheduled_at ASC NULLS FIRST
+    LIMIT 5`
+
+  for (const post of rows) {
+    try {
+      const photo = post.photo_file_id || post.image_url
+      const res = photo
+        ? await tgApi(env, 'sendPhoto', {
+            chat_id: env.TELEGRAM_CHANNEL_ID,
+            photo,
+            caption: truncate(post.body, 1024),
+          })
+        : await tgApi(env, 'sendMessage', {
+            chat_id: env.TELEGRAM_CHANNEL_ID,
+            text: truncate(post.body, 4096),
+          })
+      const data = (await res.json()) as {
+        ok: boolean
+        result?: { message_id: number }
+        description?: string
+      }
+      if (!data.ok || !data.result) {
+        throw new Error(data.description || 'Telegram API error')
+      }
+      await sql`
+        UPDATE posts
+        SET status = 'published', published_at = NOW(),
+            tg_message_id = ${data.result.message_id}, updated_at = NOW()
+        WHERE id = ${post.id}`
+      await reply(env, Number(env.ADMIN_TELEGRAM_ID), `Опубликован пост #${post.id} в канал.`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const updated = await sql`
+        UPDATE posts
+        SET attempts = attempts + 1, last_error = ${message}, updated_at = NOW()
+        WHERE id = ${post.id} RETURNING attempts`
+      if (updated[0]?.attempts >= MAX_ATTEMPTS) {
+        await reply(
+          env,
+          Number(env.ADMIN_TELEGRAM_ID),
+          `Пост #${post.id} не опубликован после ${MAX_ATTEMPTS} попыток: ${truncate(message, 300)}`,
+        )
+      }
+    }
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
+    await publishDuePosts(env)
+  },
+}

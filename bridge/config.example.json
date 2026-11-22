@@ -1,0 +1,8 @@
+{
+  "workerUrl": "https://<your-worker>.<your-subdomain>.workers.dev",
+  "aiApiKey": "<AI_API_KEY from wrangler secrets>",
+  "cwd": "C:/path/to/MyWay",
+  "qwenPath": "C:/Users/<user>/.qwen/bin/qwen/qwen.exe",
+  "pollMs": 10000,
+  "timeoutMs": 600000
+}
