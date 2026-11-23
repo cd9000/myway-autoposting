@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS posts (
     body           text        NOT NULL,
     photo_file_id  text,
     image_url      text,
+    image_prompt   text,
     source_url     text,
     status         text        NOT NULL DEFAULT 'draft'
                    CHECK (status IN ('draft','approved','publishing','published','failed','overdue','cancelled')),

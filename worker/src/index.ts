@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { neon } from '@neondatabase/serverless'
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless'
 
 type Env = {
   NEON_DATABASE_URL: string
@@ -8,6 +8,7 @@ type Env = {
   ADMIN_TELEGRAM_ID: string
   AI_API_KEY: string
   TELEGRAM_CHANNEL_ID: string
+  AI: Ai
 }
 
 type TelegramUpdate = {
@@ -23,6 +24,7 @@ type DraftInput = {
   body?: string
   source_url?: string
   image_url?: string
+  image_prompt?: string
   scheduled_at?: string
 }
 
@@ -38,6 +40,61 @@ const HELP = [
 ].join('\n')
 
 const IMAGE_STYLE = ', clean modern editorial illustration, calm daylight, no text, no letters'
+const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell'
+const SCENE_MODEL = '@cf/meta/llama-3.2-3b-instruct'
+
+type Sql = NeonQueryFunction<false, false>
+
+let schemaReady: Promise<unknown> | null = null
+function ensureSchema(sql: Sql) {
+  if (!schemaReady) {
+    schemaReady = sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_prompt TEXT`.catch((err) => {
+      schemaReady = null
+      throw err
+    })
+  }
+  return schemaReady
+}
+
+async function generatePhoto(env: Env, chatId: number, prompt: string, caption: string) {
+  const result = await env.AI.run(IMAGE_MODEL, { prompt: truncate(prompt, 2000) })
+  if (!result.image) throw new Error('модель не вернула картинку')
+  const bytes = Uint8Array.from(atob(result.image), (ch) => ch.charCodeAt(0))
+  const form = new FormData()
+  form.append('chat_id', String(chatId))
+  form.append('caption', truncate(caption, 1024))
+  form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'image.jpg')
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+  })
+  const data = (await res.json()) as {
+    ok: boolean
+    result?: { photo?: { file_id: string }[] }
+    description?: string
+  }
+  const photos = data.result?.photo
+  if (!data.ok || !photos?.length) throw new Error(data.description || 'sendPhoto failed')
+  return photos[photos.length - 1].file_id
+}
+
+async function deriveScene(env: Env, body: string) {
+  const result = await env.AI.run(SCENE_MODEL, {
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You write a short visual scene for an editorial illustration that captures the essence of a finance news post. Reply with ONLY 1-2 sentences in English describing a concrete visual scene: objects, setting, action. No brand names, no names of people, no words or letters or numbers visible in the image, no preamble, no quotes.',
+      },
+      { role: 'user', content: truncate(body, 1500) },
+    ],
+    max_tokens: 120,
+    temperature: 0.7,
+  })
+  const scene = result.response?.trim()
+  if (!scene) throw new Error('текстовая модель не вернула описание сцены')
+  return scene
+}
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -206,37 +263,30 @@ async function handleCommand(env: Env, chatId: number, text: string) {
         await reply(env, chatId, 'Использование: /redo <id> [описание сцены]')
         return
       }
-      const rows = await sql`SELECT id, body, image_url FROM posts WHERE id = ${id}`
+      await ensureSchema(sql)
+      const rows = await sql`SELECT id, body FROM posts WHERE id = ${id}`
       if (rows.length === 0) {
         await reply(env, chatId, `Пост #${id} не найден.`)
         return
       }
       const post = rows[0]
-      const scene = parts.slice(2).join(' ')
-      let prompt: string
-      if (scene) {
-        prompt = scene + IMAGE_STYLE
-      } else if (post.image_url) {
-        try {
-          prompt = decodeURIComponent(new URL(post.image_url).pathname.replace(/^\/prompt\//, ''))
-        } catch {
-          prompt = post.body.slice(0, 200) + IMAGE_STYLE
-        }
-      } else {
-        prompt = post.body.slice(0, 200) + IMAGE_STYLE
-      }
-      const seed = Math.floor(Math.random() * 100000)
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1280&height=720&model=flux&nologo=true&seed=${seed}`
-      await sql`UPDATE posts SET image_url = ${imageUrl}, updated_at = NOW() WHERE id = ${id}`
-      const sceneText = truncate(prompt.replace(IMAGE_STYLE, ''), 500)
+      const sceneArg = parts.slice(2).join(' ')
       try {
-        await tgApi(env, 'sendPhoto', {
-          chat_id: chatId,
-          photo: imageUrl,
-          caption: `Новая картинка поста #${id}\nСцена: ${sceneText}\n\nНе нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
-        })
-      } catch {
-        await reply(env, chatId, `Картинка поста #${id} обновлена.\nСцена: ${sceneText}\nПревью не удалось загрузить — посмотрите через /post ${id}.`)
+        const scene = sceneArg || (await deriveScene(env, post.body))
+        const sceneText = truncate(scene, 500)
+        const fileId = await generatePhoto(
+          env,
+          chatId,
+          scene + IMAGE_STYLE,
+          `Новая картинка поста #${id}\nСцена: ${sceneText}\n\nНе нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
+        )
+        await sql`
+          UPDATE posts
+          SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
+          WHERE id = ${id}`
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        await reply(env, chatId, `Не удалось сгенерировать картинку поста #${id}: ${truncate(message, 300)}`)
       }
       return
     }
@@ -312,8 +362,10 @@ app.post('/ai/drafts', async (c) => {
   }
 
   const sql = neon(c.env.NEON_DATABASE_URL)
+  await ensureSchema(sql)
   let inserted = 0
   const ids: number[] = []
+  const imageJobs: { id: number; scene: string }[] = []
   for (const draft of drafts) {
     if (typeof draft.body !== 'string' || draft.body.trim() === '') continue
     let scheduledAt: string | null = null
@@ -324,13 +376,37 @@ app.post('/ai/drafts', async (c) => {
       }
       scheduledAt = date.toISOString()
     }
+    const scene = typeof draft.image_prompt === 'string' && draft.image_prompt.trim()
+      ? draft.image_prompt.trim()
+      : null
     const rows = await sql`
-      INSERT INTO posts (type, body, source_url, image_url, scheduled_at, status)
-      VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${draft.image_url ?? null}, ${scheduledAt}, 'draft')
+      INSERT INTO posts (type, body, source_url, image_url, image_prompt, scheduled_at, status)
+      VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${draft.image_url ?? null}, ${scene}, ${scheduledAt}, 'draft')
       RETURNING id`
     inserted++
-    ids.push(Number(rows[0].id))
+    const id = Number(rows[0].id)
+    ids.push(id)
+    if (scene) imageJobs.push({ id, scene })
   }
+  const env = c.env
+  c.executionCtx.waitUntil(
+    (async () => {
+      for (const job of imageJobs) {
+        try {
+          const fileId = await generatePhoto(
+            env,
+            Number(env.ADMIN_TELEGRAM_ID),
+            job.scene + IMAGE_STYLE,
+            `Картинка поста #${job.id}\nСцена: ${truncate(job.scene, 500)}\n\nНе нравится — /redo ${job.id} или /redo ${job.id} <своё описание>.`,
+          )
+          await sql`UPDATE posts SET photo_file_id = ${fileId}, updated_at = NOW() WHERE id = ${job.id}`
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          await reply(env, Number(env.ADMIN_TELEGRAM_ID), `Картинка поста #${job.id} не сгенерирована: ${truncate(message, 300)}\nПопробуй: /redo ${job.id}`).catch(() => {})
+        }
+      }
+    })(),
+  )
   return c.json({ ok: true, inserted, ids })
 })
 

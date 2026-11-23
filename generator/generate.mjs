@@ -121,15 +121,13 @@ async function main() {
   const drafts = parseDrafts(output)
   if (drafts.length === 0) throw new Error('no valid drafts generated')
 
-  const payload = drafts.slice(0, 2).map((d, i) => {
+  const payload = drafts.slice(0, 2).map((d) => {
     const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
     const body = source && !d.body.includes(source) ? `${d.body}\n\nИсточник: ${source}` : d.body
     const scene = typeof d.image_prompt === 'string' && d.image_prompt.trim()
       ? d.image_prompt.trim()
       : d.body.slice(0, 200)
-    const prompt = `${scene}, clean modern editorial illustration, calm daylight, no text, no letters`
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1280&height=720&model=flux&nologo=true&seed=${Date.now() % 100000 + i}`
-    return { type: 'news', body, source_url: source, image_url: imageUrl, scheduled_at: slots[i] }
+    return { type: 'news', body, source_url: source, image_prompt: scene, scheduled_at: slots[i] }
   })
   let result
   try {
