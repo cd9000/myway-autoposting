@@ -51,14 +51,14 @@ const BUFFER_CAP = 30
 function newsSlots(busyIso) {
   const busy = new Set(busyIso.map((s) => new Date(s).toISOString().slice(0, 16)))
   const slots = []
+  const now = new Date()
   const day = new Date()
-  day.setUTCDate(day.getUTCDate() + 1)
   day.setUTCHours(0, 0, 0, 0)
   for (let d = 0; d < NEWS_HORIZON_DAYS; d++) {
     for (const [h, m] of DAY_SLOTS) {
       const slot = new Date(day)
       slot.setUTCHours(h, m, 0, 0)
-      if (!busy.has(slot.toISOString().slice(0, 16))) slots.push(slot.toISOString())
+      if (slot > now && !busy.has(slot.toISOString().slice(0, 16))) slots.push(slot.toISOString())
     }
     day.setUTCDate(day.getUTCDate() + 1)
   }

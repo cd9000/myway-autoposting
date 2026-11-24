@@ -443,6 +443,22 @@ app.get('/ai/post/:id', async (c) => {
   return c.json({ post: rows[0] })
 })
 
+app.post('/ai/reschedule', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const body = await c.req.json<{ id?: number; scheduled_at?: string }>().catch(() => null)
+  if (!body?.id || !body?.scheduled_at) return c.json({ error: 'id and scheduled_at required' }, 400)
+  const date = new Date(body.scheduled_at)
+  if (Number.isNaN(date.getTime())) return c.json({ error: 'invalid scheduled_at' }, 400)
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    UPDATE posts SET scheduled_at = ${date.toISOString()}, updated_at = NOW()
+    WHERE id = ${body.id} RETURNING id`
+  if (rows.length === 0) return c.json({ error: 'not found' }, 404)
+  return c.json({ ok: true, id: body.id, scheduled_at: date.toISOString() })
+})
+
 app.post('/ai/notify', async (c) => {
   if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
     return c.json({ error: 'unauthorized' }, 401)
