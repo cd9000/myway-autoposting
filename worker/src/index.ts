@@ -33,7 +33,7 @@ const HELP = [
   '/status — статистика постов',
   '/queue — ближайшие запланированные посты',
   '/post <id> — детали поста',
-  '/approve <id> — одобрить пост',
+  '/approve <id> — одобрить: сгенерирует картинку и поставит в план',
   '/cancel <id> — отменить пост',
   '/redo <id> [описание] — новая картинка поста',
   'Кнопки под строкой ввода дублируют основные команды.',
@@ -291,22 +291,50 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       return
     }
 
-    case '/approve':
+    case '/approve': {
+      const id = parseId(arg)
+      if (id === null) {
+        await reply(env, chatId, 'Использование: /approve <id>')
+        return
+      }
+      await ensureSchema(sql)
+      const rows = await sql`SELECT id, body, image_prompt FROM posts WHERE id = ${id}`
+      if (rows.length === 0) {
+        await reply(env, chatId, `Пост #${id} не найден.`)
+        return
+      }
+      const post = rows[0]
+      await sql`UPDATE posts SET status = 'approved', updated_at = NOW() WHERE id = ${id}`
+      await reply(env, chatId, `Пост #${id} одобрен и поставлен в план. Генерирую картинку…`)
+      try {
+        const scene = post.image_prompt || (await deriveScene(env, post.body))
+        const fileId = await generatePhoto(
+          env,
+          chatId,
+          scene + IMAGE_STYLE,
+          `Картинка поста #${id} (одобрен, в плане)\nСцена: ${truncate(scene, 500)}\n\nНе нравится — /redo ${id} или /redo ${id} <своё описание>.`,
+        )
+        await sql`
+          UPDATE posts
+          SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
+          WHERE id = ${id}`
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        await reply(env, chatId, `Пост #${id} одобрен, но картинка не сгенерирована: ${truncate(message, 300)}\nПопробуй /redo ${id}. Без картинки пост выйдет текстом.`)
+      }
+      return
+    }
+
     case '/cancel': {
       const id = parseId(arg)
       if (id === null) {
-        await reply(env, chatId, `Использование: ${command} <id>`)
+        await reply(env, chatId, 'Использование: /cancel <id>')
         return
       }
-      const status = command === '/approve' ? 'approved' : 'cancelled'
       const rows = await sql`
-        UPDATE posts SET status = ${status}, updated_at = NOW()
+        UPDATE posts SET status = 'cancelled', updated_at = NOW()
         WHERE id = ${id} RETURNING id`
-      await reply(
-        env,
-        chatId,
-        rows.length > 0 ? `Пост #${id} → ${status}` : `Пост #${id} не найден.`,
-      )
+      await reply(env, chatId, rows.length > 0 ? `Пост #${id} отменён.` : `Пост #${id} не найден.`)
       return
     }
 
@@ -365,7 +393,6 @@ app.post('/ai/drafts', async (c) => {
   await ensureSchema(sql)
   let inserted = 0
   const ids: number[] = []
-  const imageJobs: { id: number; scene: string }[] = []
   for (const draft of drafts) {
     if (typeof draft.body !== 'string' || draft.body.trim() === '') continue
     let scheduledAt: string | null = null
@@ -384,29 +411,8 @@ app.post('/ai/drafts', async (c) => {
       VALUES (${draft.type ?? 'manual'}, ${draft.body}, ${draft.source_url ?? null}, ${draft.image_url ?? null}, ${scene}, ${scheduledAt}, 'draft')
       RETURNING id`
     inserted++
-    const id = Number(rows[0].id)
-    ids.push(id)
-    if (scene) imageJobs.push({ id, scene })
+    ids.push(Number(rows[0].id))
   }
-  const env = c.env
-  c.executionCtx.waitUntil(
-    (async () => {
-      for (const job of imageJobs) {
-        try {
-          const fileId = await generatePhoto(
-            env,
-            Number(env.ADMIN_TELEGRAM_ID),
-            job.scene + IMAGE_STYLE,
-            `Картинка поста #${job.id}\nСцена: ${truncate(job.scene, 500)}\n\nНе нравится — /redo ${job.id} или /redo ${job.id} <своё описание>.`,
-          )
-          await sql`UPDATE posts SET photo_file_id = ${fileId}, updated_at = NOW() WHERE id = ${job.id}`
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          await reply(env, Number(env.ADMIN_TELEGRAM_ID), `Картинка поста #${job.id} не сгенерирована: ${truncate(message, 300)}\nПопробуй: /redo ${job.id}`).catch(() => {})
-        }
-      }
-    })(),
-  )
   return c.json({ ok: true, inserted, ids })
 })
 
