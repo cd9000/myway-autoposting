@@ -437,7 +437,7 @@ app.get('/ai/post/:id', async (c) => {
   if (!Number.isInteger(id)) return c.json({ error: 'invalid id' }, 400)
   const sql = neon(c.env.NEON_DATABASE_URL)
   const rows = await sql`
-    SELECT id, type, body, status, scheduled_at, source_url
+    SELECT id, type, body, status, scheduled_at, source_url, photo_file_id, image_prompt
     FROM posts WHERE id = ${id}`
   if (rows.length === 0) return c.json({ error: 'not found' }, 404)
   return c.json({ post: rows[0] })
