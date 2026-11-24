@@ -1,7 +1,7 @@
 import { readFileSync, appendFileSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const dir = dirname(fileURLToPath(import.meta.url))
 const config = JSON.parse(readFileSync(join(dir, '..', 'bridge', 'config.json'), 'utf8'))
@@ -44,26 +44,26 @@ async function api(path, body) {
 }
 
 const MSK_OFFSET_H = 3
-const DAY_SLOTS = [[12, 0], [16, 0], [19, 5]] // часы МСК
-const NEWS_HORIZON_DAYS = 2
-const MAX_NEWS_PER_RUN = 3
+const ARTICLE_SLOT = [16, 0] // МСК, длинная статья для Дзена
+const NEWS_SLOTS = [[12, 0], [19, 5]] // МСК, короткие новости
+const HORIZON_DAYS = 2
 const BUFFER_CAP = 30
 
-function newsSlots(busyIso) {
+function freeSlots(busyIso, slotDefs, max, horizon = HORIZON_DAYS) {
   const busy = new Set(busyIso.map((s) => new Date(s).toISOString().slice(0, 16)))
   const slots = []
   const now = new Date()
   const day = new Date()
   day.setUTCHours(0, 0, 0, 0)
-  for (let d = 0; d < NEWS_HORIZON_DAYS; d++) {
-    for (const [h, m] of DAY_SLOTS) {
+  for (let d = 0; d < horizon; d++) {
+    for (const [h, m] of slotDefs) {
       const slot = new Date(day)
       slot.setUTCHours(h - MSK_OFFSET_H, m, 0, 0)
       if (slot > now && !busy.has(slot.toISOString().slice(0, 16))) slots.push(slot.toISOString())
     }
     day.setUTCDate(day.getUTCDate() + 1)
   }
-  return slots.slice(0, MAX_NEWS_PER_RUN)
+  return slots.slice(0, max)
 }
 
 function runQwen(prompt) {
@@ -181,18 +181,75 @@ ${ctaPlan}
 ${CTA_PRODUCTS}`
 }
 
+function parseArticle(output) {
+  const start = output.indexOf('{')
+  const end = output.lastIndexOf('}')
+  if (start === -1 || end === -1) throw new Error('no JSON in article output')
+  const data = JSON.parse(output.slice(start, end + 1))
+  if (typeof data.body !== 'string' || data.body.trim().length < 500) throw new Error('article body missing or too short')
+  return data
+}
+
+function buildArticlePrompt(newsPath) {
+  return `Ты — автор канала о личных финансах «Мой путь к Финансовой Свободе». Напиши длинную статью для Дзена на основе свежих новостей.
+
+1. Через Read прочитай файл свежих постов: ${newsPath} (Telegram-каналы и AI-блоги; дата, ссылка, текст).
+2. Выбери ОДНУ заметную свежую тему (личные финансы, экономика, инвестиции, технологии/ИИ, влияющие на деньги) и раскрой её глубоко.
+3. Напиши статью на 3500-3900 знаков, по-русски, своими словами, БЕЗ выдумок — только факты из файла. Английские новости переводи.
+4. Структура (markdown): заголовок (# ...), лид-абзац (1-2 предложения — суть и интрига), 2-3 подзаголовка (## ...) с раскрытием темы, финальный вывод.
+5. Финальный вывод свяжи с инвестированием или бизнес-мышлением: как эта новость отразится на рынке и деньгах читателя, что делать.
+6. В конце статьи блок «Ссылки»: источник новости + 1-2 уместных по теме материала автора (игра или книги из списка ниже).
+7. Составь image_prompt — визуальная сцена по теме на английском (1-2 предложения, без брендов и текста).
+8. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
+{"body":"полный текст статьи со структурой","source_url":"ссылка на источник из файла","image_prompt":"scene description"}
+
+${CTA_PRODUCTS}`
+}
+
+function buildFactCheckPrompt(newsPath, article) {
+  return `Ты — редактор-фактчекер. Проверь статью на актуальность, фактические ошибки и выдуманную информацию.
+
+1. Через Read прочитай файл исходных данных: ${newsPath}.
+2. Статья (JSON): ${JSON.stringify(article)}
+3. Сверь факты статьи с исходными данными. Исправь ошибки, убери выдуманные факты, цифры и утверждения, которых нет в источниках. Сохрани структуру (заголовок, лид, ## подзаголовки, вывод), объём 3500-3900 знаков и ссылки в конце.
+4. Верни ТОЛЬКО исправленный JSON без пояснений и без markdown-ограждений:
+{"body":"...","source_url":"...","image_prompt":"..."}`
+}
+
+export async function generateArticle(newsPath) {
+  const draft = parseArticle(await runQwen(buildArticlePrompt(newsPath)))
+  return parseArticle(await runQwen(buildFactCheckPrompt(newsPath, draft)))
+}
+
+async function insertDrafts(payload, slots) {
+  try {
+    return await api('/ai/drafts', { drafts: payload })
+  } catch (err) {
+    log(`drafts insert response lost (${err.message}); verifying via schedule`)
+    const { posts } = await api('/ai/schedule')
+    const slotTimes = slots.slice(0, payload.length).map((s) => new Date(s).getTime())
+    const mine = posts.filter(
+      (p) => p.status === 'draft' && slotTimes.includes(new Date(p.scheduled_at).getTime()),
+    )
+    if (mine.length === 0) throw err
+    return { inserted: mine.length, ids: mine.map((p) => Number(p.id)) }
+  }
+}
+
 async function main() {
   const { posts } = await api('/ai/schedule')
   if (!DRY && posts.length >= BUFFER_CAP) {
     log(`buffer full (${posts.length}/${BUFFER_CAP} future posts) - skipping generation`)
     return
   }
-  const slots = newsSlots(posts.map((p) => p.scheduled_at))
-  if (slots.length === 0) {
-    log('ближайшие новостные слоты заполнены - пропускаю генерацию')
+  const busy = posts.map((p) => p.scheduled_at)
+  const artSlots = freeSlots(busy, [ARTICLE_SLOT], 1, 4)
+  const nSlots = freeSlots(busy, NEWS_SLOTS, 2)
+  if (artSlots.length === 0 && nSlots.length === 0) {
+    log('ближайшие слоты заполнены - пропускаю генерацию')
     return
   }
-  log(`generating ${slots.length} news drafts for slots: ${slots.join(', ')}`)
+  log(`article slots: ${artSlots.join(', ') || '-'}; news slots: ${nSlots.join(', ') || '-'}`)
 
   const newsPath = await runNewsFetch()
   try {
@@ -204,52 +261,59 @@ async function main() {
   log(`collected ${collected} posts (${NEWS_CHANNELS.length} TG channels + AI blog RSS)`)
   if (collected === 0) throw new Error('источники не дали свежих постов за последние 2 дня')
 
-  const ctaTypes = nextCtaTypes(slots.length)
-  const output = await runQwen(buildPrompt(newsPath, slots.length, ctaTypes))
-  const drafts = parseDrafts(output)
-  if (drafts.length === 0) throw new Error('no valid drafts generated')
+  const payload = []
+  const slots = []
 
-  const payload = drafts.slice(0, slots.length).map((d, i) => {
-    const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
-    const body = source && !d.body.includes(source) ? `${d.body}\n\nИсточник: ${source}` : d.body
-    const scene = typeof d.image_prompt === 'string' && d.image_prompt.trim()
-      ? d.image_prompt.trim()
-      : d.body.slice(0, 200)
-    return { type: 'news', body, source_url: source, image_prompt: scene, scheduled_at: slots[i] }
-  })
+  if (artSlots.length) {
+    log('generating article (write + fact-check)...')
+    const art = await generateArticle(newsPath)
+    const source = typeof art.source_url === 'string' && /^https?:\/\//.test(art.source_url) ? art.source_url : null
+    const scene = typeof art.image_prompt === 'string' && art.image_prompt.trim() ? art.image_prompt.trim() : art.body.slice(0, 200)
+    payload.push({ type: 'article', body: art.body, source_url: source, image_prompt: scene, scheduled_at: artSlots[0] })
+    slots.push(artSlots[0])
+  }
+
+  let ctaTypes = []
+  let newsCount = 0
+  if (nSlots.length) {
+    ctaTypes = nextCtaTypes(nSlots.length)
+    const drafts = parseDrafts(await runQwen(buildPrompt(newsPath, nSlots.length, ctaTypes)))
+    if (drafts.length === 0 && !payload.length) throw new Error('no valid drafts generated')
+    drafts.slice(0, nSlots.length).forEach((d, i) => {
+      const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
+      const body = source && !d.body.includes(source) ? `${d.body}\n\nИсточник: ${source}` : d.body
+      const scene = typeof d.image_prompt === 'string' && d.image_prompt.trim() ? d.image_prompt.trim() : d.body.slice(0, 200)
+      payload.push({ type: 'news', body, source_url: source, image_prompt: scene, scheduled_at: nSlots[i] })
+      slots.push(nSlots[i])
+      newsCount++
+    })
+  }
+
   if (DRY) {
     log('DRY RUN — черновики не вставляются:')
     console.log(JSON.stringify(payload, null, 2))
     return
   }
-  let result
-  try {
-    result = await api('/ai/drafts', { drafts: payload })
-  } catch (err) {
-    log(`drafts insert response lost (${err.message}); verifying via schedule`)
-    const { posts } = await api('/ai/schedule')
-    const slotTimes = slots.slice(0, payload.length).map((s) => new Date(s).getTime())
-    const mine = posts.filter(
-      (p) => p.status === 'draft' && slotTimes.includes(new Date(p.scheduled_at).getTime()),
-    )
-    if (mine.length === 0) throw err
-    result = { inserted: mine.length, ids: mine.map((p) => Number(p.id)) }
-  }
+
+  const result = await insertDrafts(payload, slots)
   log(`inserted ${result.inserted} drafts: ids ${result.ids.join(', ')}`)
-  writeFileSync(ctaStatePath, JSON.stringify({ last: ctaTypes[payload.length - 1] }))
+  if (newsCount > 0) writeFileSync(ctaStatePath, JSON.stringify({ last: ctaTypes[newsCount - 1] }))
 
   const lines = ['📝 Новые черновики готовы:']
   result.ids.forEach((id, i) => {
     const when = new Date(new Date(slots[i]).getTime() + MSK_OFFSET_H * 3600000).toISOString().slice(0, 16).replace('T', ' ') + ' МСК'
+    const kind = payload[i].type === 'article' ? '📄 статья (Дзен)' : '📝 новость'
     const preview = payload[i].body.slice(0, 150).replace(/\n/g, ' ')
-    lines.push(`\n#${id} → ${when}\n${preview}…\nОдобрить: /approve ${id}`)
+    lines.push(`\n#${id} ${kind} → ${when}\n${preview}…\nОдобрить: /approve ${id}`)
   })
   await api('/ai/notify', { text: lines.join('\n') })
   log('admin notified')
 }
 
-main().catch(async (err) => {
-  log(`ERROR: ${err.message}`)
-  await api('/ai/notify', { text: `⚠️ Генератор черновиков не сработал: ${err.message.slice(0, 300)}` }).catch(() => {})
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(async (err) => {
+    log(`ERROR: ${err.message}`)
+    await api('/ai/notify', { text: `⚠️ Генератор черновиков не сработал: ${err.message.slice(0, 300)}` }).catch(() => {})
+    process.exit(1)
+  })
+}

@@ -42,13 +42,19 @@ const HELP = [
 const IMAGE_STYLE = ', clean modern editorial illustration, calm daylight, no text, no letters'
 const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell'
 const SCENE_MODEL = '@cf/meta/llama-3.2-3b-instruct'
+const PUBLIC_URL = 'https://myway-worker.myway-worker.workers.dev'
 
 type Sql = NeonQueryFunction<false, false>
 
 let schemaReady: Promise<unknown> | null = null
 function ensureSchema(sql: Sql) {
   if (!schemaReady) {
-    schemaReady = sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_prompt TEXT`.catch((err) => {
+    schemaReady = (async () => {
+      await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_prompt TEXT`
+      await sql`ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_b64 TEXT`
+      await sql`ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_type_check`
+      await sql`ALTER TABLE posts ADD CONSTRAINT posts_type_check CHECK (type IN ('plan','news','manual','article'))`
+    })().catch((err) => {
       schemaReady = null
       throw err
     })
@@ -75,7 +81,7 @@ async function generatePhoto(env: Env, chatId: number, prompt: string, caption: 
   }
   const photos = data.result?.photo
   if (!data.ok || !photos?.length) throw new Error(data.description || 'sendPhoto failed')
-  return photos[photos.length - 1].file_id
+  return { fileId: photos[photos.length - 1].file_id, b64: result.image }
 }
 
 async function deriveScene(env: Env, body: string) {
@@ -265,7 +271,7 @@ async function handleCommand(env: Env, chatId: number, text: string) {
         return
       }
       await ensureSchema(sql)
-      const rows = await sql`SELECT id, body FROM posts WHERE id = ${id}`
+      const rows = await sql`SELECT id, body, type FROM posts WHERE id = ${id}`
       if (rows.length === 0) {
         await reply(env, chatId, `Пост #${id} не найден.`)
         return
@@ -275,16 +281,23 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       try {
         const scene = sceneArg || (await deriveScene(env, post.body))
         const sceneText = truncate(scene, 500)
-        const fileId = await generatePhoto(
+        const { fileId, b64 } = await generatePhoto(
           env,
           chatId,
           scene + IMAGE_STYLE,
           `Новая картинка поста #${id}\nСцена: ${sceneText}\n\nНе нравится — /redo ${id} ещё раз или /redo ${id} <своё описание>.`,
         )
-        await sql`
-          UPDATE posts
-          SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
-          WHERE id = ${id}`
+        if (post.type === 'article') {
+          await sql`
+            UPDATE posts
+            SET image_b64 = ${b64}, image_url = ${`${PUBLIC_URL}/img/${id}`}, image_prompt = ${scene}, updated_at = NOW()
+            WHERE id = ${id}`
+        } else {
+          await sql`
+            UPDATE posts
+            SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
+            WHERE id = ${id}`
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         await reply(env, chatId, `Не удалось сгенерировать картинку поста #${id}: ${truncate(message, 300)}`)
@@ -299,7 +312,7 @@ async function handleCommand(env: Env, chatId: number, text: string) {
         return
       }
       await ensureSchema(sql)
-      const rows = await sql`SELECT id, body, image_prompt FROM posts WHERE id = ${id}`
+      const rows = await sql`SELECT id, body, type, image_prompt FROM posts WHERE id = ${id}`
       if (rows.length === 0) {
         await reply(env, chatId, `Пост #${id} не найден.`)
         return
@@ -309,16 +322,23 @@ async function handleCommand(env: Env, chatId: number, text: string) {
       await reply(env, chatId, `Пост #${id} одобрен и поставлен в план. Генерирую картинку…`)
       try {
         const scene = post.image_prompt || (await deriveScene(env, post.body))
-        const fileId = await generatePhoto(
+        const { fileId, b64 } = await generatePhoto(
           env,
           chatId,
           scene + IMAGE_STYLE,
           `Картинка поста #${id} (одобрен, в плане)\nСцена: ${truncate(scene, 500)}\n\nНе нравится — /redo ${id} или /redo ${id} <своё описание>.`,
         )
-        await sql`
-          UPDATE posts
-          SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
-          WHERE id = ${id}`
+        if (post.type === 'article') {
+          await sql`
+            UPDATE posts
+            SET image_b64 = ${b64}, image_url = ${`${PUBLIC_URL}/img/${id}`}, image_prompt = ${scene}, updated_at = NOW()
+            WHERE id = ${id}`
+        } else {
+          await sql`
+            UPDATE posts
+            SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
+            WHERE id = ${id}`
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         await reply(env, chatId, `Пост #${id} одобрен, но картинка не сгенерирована: ${truncate(message, 300)}\nПопробуй /redo ${id}. Без картинки пост выйдет текстом.`)
@@ -345,6 +365,19 @@ async function handleCommand(env: Env, chatId: number, text: string) {
 }
 
 app.get('/', (c) => c.json({ status: 'ok' }))
+
+app.get('/img/:id', async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id)) return c.json({ error: 'invalid id' }, 400)
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`SELECT image_b64 FROM posts WHERE id = ${id}`
+  const b64 = rows[0]?.image_b64
+  if (!b64) return c.json({ error: 'not found' }, 404)
+  const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0))
+  return new Response(bytes, {
+    headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' },
+  })
+})
 
 app.post('/tg', async (c) => {
   const secret = c.req.header('X-Telegram-Bot-Api-Secret-Token')
@@ -544,10 +577,14 @@ app.post('/agent/fail', async (c) => {
 
 const MAX_ATTEMPTS = 3
 
+function escapeHtml(s: string) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 async function publishDuePosts(env: Env) {
   const sql = neon(env.NEON_DATABASE_URL)
   const rows = await sql`
-    SELECT id, body, photo_file_id, image_url
+    SELECT id, body, type, photo_file_id, image_url
     FROM posts
     WHERE status = 'approved' AND attempts < ${MAX_ATTEMPTS}
       AND (scheduled_at IS NULL OR scheduled_at <= NOW())
@@ -556,17 +593,27 @@ async function publishDuePosts(env: Env) {
 
   for (const post of rows) {
     try {
-      const photo = post.photo_file_id || post.image_url
-      const res = photo
-        ? await tgApi(env, 'sendPhoto', {
-            chat_id: env.TELEGRAM_CHANNEL_ID,
-            photo,
-            caption: truncate(post.body, 1024),
-          })
-        : await tgApi(env, 'sendMessage', {
-            chat_id: env.TELEGRAM_CHANNEL_ID,
-            text: truncate(post.body, 4096),
-          })
+      let res: Response
+      if (post.type === 'article') {
+        const link = post.image_url ? `<a href="${post.image_url}">&#8203;</a>` : ''
+        res = await tgApi(env, 'sendMessage', {
+          chat_id: env.TELEGRAM_CHANNEL_ID,
+          text: link + escapeHtml(truncate(post.body, 4000)),
+          parse_mode: 'HTML',
+        })
+      } else {
+        const photo = post.photo_file_id || post.image_url
+        res = photo
+          ? await tgApi(env, 'sendPhoto', {
+              chat_id: env.TELEGRAM_CHANNEL_ID,
+              photo,
+              caption: truncate(post.body, 1024),
+            })
+          : await tgApi(env, 'sendMessage', {
+              chat_id: env.TELEGRAM_CHANNEL_ID,
+              text: truncate(post.body, 4096),
+            })
+      }
       const data = (await res.json()) as {
         ok: boolean
         result?: { message_id: number }
