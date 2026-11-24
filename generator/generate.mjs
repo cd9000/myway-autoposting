@@ -43,7 +43,8 @@ async function api(path, body) {
   throw lastErr
 }
 
-const DAY_SLOTS = [[9, 0], [13, 0], [16, 5]]
+const MSK_OFFSET_H = 3
+const DAY_SLOTS = [[12, 0], [16, 0], [19, 5]] // часы МСК
 const NEWS_HORIZON_DAYS = 2
 const MAX_NEWS_PER_RUN = 3
 const BUFFER_CAP = 30
@@ -57,7 +58,7 @@ function newsSlots(busyIso) {
   for (let d = 0; d < NEWS_HORIZON_DAYS; d++) {
     for (const [h, m] of DAY_SLOTS) {
       const slot = new Date(day)
-      slot.setUTCHours(h, m, 0, 0)
+      slot.setUTCHours(h - MSK_OFFSET_H, m, 0, 0)
       if (slot > now && !busy.has(slot.toISOString().slice(0, 16))) slots.push(slot.toISOString())
     }
     day.setUTCDate(day.getUTCDate() + 1)
@@ -239,7 +240,7 @@ async function main() {
 
   const lines = ['📝 Новые черновики готовы:']
   result.ids.forEach((id, i) => {
-    const when = new Date(slots[i]).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+    const when = new Date(new Date(slots[i]).getTime() + MSK_OFFSET_H * 3600000).toISOString().slice(0, 16).replace('T', ' ') + ' МСК'
     const preview = payload[i].body.slice(0, 150).replace(/\n/g, ' ')
     lines.push(`\n#${id} → ${when}\n${preview}…\nОдобрить: /approve ${id}`)
   })

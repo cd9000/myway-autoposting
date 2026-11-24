@@ -138,7 +138,8 @@ function truncate(text: string, max: number) {
 
 function formatMoment(value: string | null) {
   if (!value) return '—'
-  return new Date(value).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+  const msk = new Date(new Date(value).getTime() + 3 * 3600000)
+  return msk.toISOString().slice(0, 16).replace('T', ' ') + ' МСК'
 }
 
 function parseId(arg: string | undefined) {
