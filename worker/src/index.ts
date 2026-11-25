@@ -463,6 +463,22 @@ app.get('/ai/schedule', async (c) => {
   return c.json({ posts: rows })
 })
 
+app.get('/ai/recent', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const days = Math.min(Number(c.req.query('days') || '14') || 14, 60)
+  const sql = neon(c.env.NEON_DATABASE_URL)
+  const rows = await sql`
+    SELECT id, type, status, LEFT(body, 160) AS snippet, scheduled_at, published_at
+    FROM posts
+    WHERE status IN ('draft', 'approved', 'published')
+      AND COALESCE(published_at, scheduled_at) > NOW() - make_interval(days => ${days})
+    ORDER BY COALESCE(published_at, scheduled_at) DESC
+    LIMIT 40`
+  return c.json({ posts: rows })
+})
+
 app.get('/ai/post/:id', async (c) => {
   if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
     return c.json({ error: 'unauthorized' }, 401)

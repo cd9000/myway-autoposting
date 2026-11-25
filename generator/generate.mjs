@@ -160,7 +160,19 @@ function runRssFetch(outPath) {
   })
 }
 
-function buildPrompt(newsPath, count, ctaTypes) {
+async function coveredTopics() {
+  try {
+    const { posts } = await api('/ai/recent?days=14')
+    return posts.map((p) => {
+      const first = (p.snippet || '').split('\n').find((l) => l.trim()) || ''
+      return `- #${p.id} (${p.type}): ${first.replace(/^#+\s*/, '').slice(0, 120)}`
+    }).join('\n')
+  } catch {
+    return ''
+  }
+}
+
+function buildPrompt(newsPath, count, ctaTypes, covered) {
   const example = Array.from({ length: count }, (_, i) =>
     `{"body":"текст поста ${i + 1}","source_url":"https://t.me/...","image_prompt":"scene description"}`).join(',')
   const ctaPlan = ctaTypes.map((t, i) =>
@@ -169,7 +181,7 @@ function buildPrompt(newsPath, count, ctaTypes) {
 
 Задача:
 1. Через Read прочитай файл свежих постов: ${newsPath}. В нём посты Telegram-каналов и официальных AI-блогов (OpenAI, Google AI, DeepMind, Meta). Каждый пост — дата и ссылка (t.me или статья блога), затем текст; у Telegram-постов указаны просмотры.
-2. Выбери ${count} РАЗНЫЕ свежие новости (за последние 1-2 дня), важные для читателя: личные финансы, экономика, вклады, кредиты, ипотека, налоги, пенсии; допускаются технологии и ИИ, если они влияют на деньги или работу. Предпочитай заметные новости с высокими просмотрами. Английские новости переводи на русский.
+2. Выбери ${count} РАЗНЫЕ свежие новости (за последние 1-2 дня), важные для читателя: личные финансы, экономика, вклады, кредиты, ипотека, налоги, пенсии; допускаются технологии и ИИ, если они влияют на деньги или работу. Предпочитай заметные новости с высокими просмотрами. Английские новости переводи на русский. НЕ выбирай темы, уже освещённые в списке в конце промта, и не пиши похожие посты.
 3. Напиши по каждой пост на 400-600 символов своими словами: суть новости + что это значит для читателя. Не копируй текст источника. Без заголовков-кликбейта, без HTML.
 4. В конце каждого поста отдельным абзацем добавь приписку — 1-2 предложения: логичный вывод из темы поста, который естественно подводит к продукту автора, и ссылку на него. Это полезный переход, а не рекламный лозунг. Для книги укажи её название и ссылку. Распределение приписок:
 ${ctaPlan}
@@ -177,6 +189,9 @@ ${ctaPlan}
 6. Для каждого поста составь image_prompt — краткую выжимку сути поста как визуальную сцену на английском (1-2 предложения, без названий и брендов). Пример: "a glass piggy bank full of coins on a conveyor belt between two bank buildings, paperwork and rubber stamps".
 7. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений, ровно ${count} элементов в drafts (приписка входит в body):
 {"drafts":[${example}]}
+
+Уже освещённые темы за последние 2 недели — НЕ повторяй их и не пиши похожие посты:
+${covered || '(пока нет)'}
 
 ${CTA_PRODUCTS}`
 }
@@ -190,11 +205,11 @@ function parseArticle(output) {
   return data
 }
 
-function buildArticlePrompt(newsPath) {
+function buildArticlePrompt(newsPath, covered) {
   return `Ты — автор канала о личных финансах «Мой путь к Финансовой Свободе». Напиши длинную статью для Дзена на основе свежих новостей.
 
 1. Через Read прочитай файл свежих постов: ${newsPath} (Telegram-каналы и AI-блоги; дата, ссылка, текст).
-2. Выбери ОДНУ заметную свежую тему (личные финансы, экономика, инвестиции, технологии/ИИ, влияющие на деньги) и раскрой её глубоко.
+2. Выбери ОДНУ заметную свежую тему (личные финансы, экономика, инвестиции, технологии/ИИ, влияющие на деньги) и раскрой её глубоко. Тема ОБЯЗАТЕЛЬНО должна отличаться от уже освещённых в списке в конце промта — не пиши статью на ту же или похожую тему.
 3. Напиши статью на 3500-3900 знаков, по-русски, своими словами, БЕЗ выдумок — только факты из файла. Английские новости переводи.
 4. Структура (markdown): заголовок (# ...), лид-абзац (1-2 предложения — суть и интрига), 2-3 подзаголовка (## ...) с раскрытием темы, финальный вывод.
 5. Финальный вывод свяжи с инвестированием или бизнес-мышлением: как эта новость отразится на рынке и деньгах читателя, что делать.
@@ -202,6 +217,9 @@ function buildArticlePrompt(newsPath) {
 7. Составь image_prompt — визуальная сцена по теме на английском (1-2 предложения, без брендов и текста).
 8. Верни ТОЛЬКО JSON без пояснений и без markdown-ограждений:
 {"body":"полный текст статьи со структурой","source_url":"ссылка на источник из файла","image_prompt":"scene description"}
+
+Уже освещённые темы за последние 2 недели — выбери ДРУГУЮ тему, не пиши на эти и похожие:
+${covered || '(пока нет)'}
 
 ${CTA_PRODUCTS}`
 }
@@ -216,8 +234,8 @@ function buildFactCheckPrompt(newsPath, article) {
 {"body":"...","source_url":"...","image_prompt":"..."}`
 }
 
-export async function generateArticle(newsPath) {
-  const draft = parseArticle(await runQwen(buildArticlePrompt(newsPath)))
+export async function generateArticle(newsPath, covered) {
+  const draft = parseArticle(await runQwen(buildArticlePrompt(newsPath, covered)))
   return parseArticle(await runQwen(buildFactCheckPrompt(newsPath, draft)))
 }
 
@@ -261,12 +279,13 @@ async function main() {
   log(`collected ${collected} posts (${NEWS_CHANNELS.length} TG channels + AI blog RSS)`)
   if (collected === 0) throw new Error('источники не дали свежих постов за последние 2 дня')
 
+  const covered = await coveredTopics()
   const payload = []
   const slots = []
 
   if (artSlots.length) {
     log('generating article (write + fact-check)...')
-    const art = await generateArticle(newsPath)
+    const art = await generateArticle(newsPath, covered)
     const source = typeof art.source_url === 'string' && /^https?:\/\//.test(art.source_url) ? art.source_url : null
     const scene = typeof art.image_prompt === 'string' && art.image_prompt.trim() ? art.image_prompt.trim() : art.body.slice(0, 200)
     payload.push({ type: 'article', body: art.body, source_url: source, image_prompt: scene, scheduled_at: artSlots[0] })
@@ -277,7 +296,7 @@ async function main() {
   let newsCount = 0
   if (nSlots.length) {
     ctaTypes = nextCtaTypes(nSlots.length)
-    const drafts = parseDrafts(await runQwen(buildPrompt(newsPath, nSlots.length, ctaTypes)))
+    const drafts = parseDrafts(await runQwen(buildPrompt(newsPath, nSlots.length, ctaTypes, covered)))
     if (drafts.length === 0 && !payload.length) throw new Error('no valid drafts generated')
     drafts.slice(0, nSlots.length).forEach((d, i) => {
       const source = typeof d.source_url === 'string' && /^https?:\/\//.test(d.source_url) ? d.source_url : null
