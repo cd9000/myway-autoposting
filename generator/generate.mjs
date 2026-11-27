@@ -49,6 +49,11 @@ const NEWS_SLOTS = [[12, 0], [19, 5]] // МСК, короткие новости
 const HORIZON_DAYS = 2
 const BUFFER_CAP = 30
 
+const dow = new Date().getDay()
+const WEEKEND_FILL = dow === 5 || dow === 6 || dow === 0
+const daysToMonday = dow === 5 ? 3 : dow === 6 ? 2 : 1
+const NEWS_HORIZON = WEEKEND_FILL ? daysToMonday + 1 : HORIZON_DAYS
+
 function freeSlots(busyIso, slotDefs, max, horizon = HORIZON_DAYS) {
   const busy = new Set(busyIso.map((s) => new Date(s).toISOString().slice(0, 16)))
   const slots = []
@@ -66,7 +71,20 @@ function freeSlots(busyIso, slotDefs, max, horizon = HORIZON_DAYS) {
   return slots.slice(0, max)
 }
 
-function runQwen(prompt) {
+async function runQwen(prompt) {
+  let lastErr
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await runQwenOnce(prompt)
+    } catch (err) {
+      lastErr = err
+      if (attempt === 1) log(`qwen сбой (${err.message.slice(0, 120)}), повторная попытка...`)
+    }
+  }
+  throw lastErr
+}
+
+function runQwenOnce(prompt) {
   return new Promise((resolve, reject) => {
     const args = [
       '-p',
@@ -254,19 +272,45 @@ async function insertDrafts(payload, slots) {
   }
 }
 
+function describeFailure(err) {
+  const m = (err && err.message) || String(err)
+  if (/news_fetch exit 2/i.test(m)) return { network: true, cause: 'проблема с сетью — не удалось связаться с Telegram-каналами' }
+  if (/fetch failed|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(m)) return { network: true, cause: 'проблема с сетью — нет связи с воркером' }
+  if (/qwen/i.test(m)) return { network: false, cause: `сбой Qwen при генерации текста, 2 попытки не удались (${m.slice(0, 150)})` }
+  if (/источники ответили/i.test(m)) return { network: false, cause: 'источники ответили, но свежих постов за последние 2 дня нет' }
+  return { network: false, cause: m.slice(0, 200) }
+}
+
+function scheduleRetry() {
+  return new Promise((resolve) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(dir, 'schedule-retry.ps1')], { windowsHide: true })
+    let out = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.on('error', () => resolve(''))
+    child.on('close', () => resolve(out.trim()))
+  })
+}
+
+function cancelRetry() {
+  const child = spawn('schtasks', ['/Delete', '/TN', 'MyWayDraftGeneratorRetry', '/F'], { windowsHide: true })
+  child.on('error', () => {})
+}
+
 async function main() {
   const { posts } = await api('/ai/schedule')
+  if (!DRY) cancelRetry()
   if (!DRY && posts.length >= BUFFER_CAP) {
     log(`buffer full (${posts.length}/${BUFFER_CAP} future posts) - skipping generation`)
-    return
+    return false
   }
   const busy = posts.map((p) => p.scheduled_at)
   const artSlots = freeSlots(busy, [ARTICLE_SLOT], 1, 4)
-  const nSlots = freeSlots(busy, NEWS_SLOTS, 2)
+  const nSlots = freeSlots(busy, NEWS_SLOTS, 2, NEWS_HORIZON)
   if (artSlots.length === 0 && nSlots.length === 0) {
     log('ближайшие слоты заполнены - пропускаю генерацию')
-    return
+    return false
   }
+  if (WEEKEND_FILL) log('режим выходных: заполняю слоты до понедельника включительно')
   log(`article slots: ${artSlots.join(', ') || '-'}; news slots: ${nSlots.join(', ') || '-'}`)
 
   const newsPath = await runNewsFetch()
@@ -277,7 +321,7 @@ async function main() {
   }
   const collected = (readFileSync(newsPath, 'utf8').match(/^=== /gm) || []).length
   log(`collected ${collected} posts (${NEWS_CHANNELS.length} TG channels + AI blog RSS)`)
-  if (collected === 0) throw new Error('источники не дали свежих постов за последние 2 дня')
+  if (collected === 0) throw new Error('источники ответили, но свежих постов за последние 2 дня нет')
 
   const covered = await coveredTopics()
   const payload = []
@@ -311,7 +355,7 @@ async function main() {
   if (DRY) {
     log('DRY RUN — черновики не вставляются:')
     console.log(JSON.stringify(payload, null, 2))
-    return
+    return true
   }
 
   const result = await insertDrafts(payload, slots)
@@ -327,12 +371,33 @@ async function main() {
   })
   await api('/ai/notify', { text: lines.join('\n') })
   log('admin notified')
+  return true
+}
+
+async function run() {
+  const maxCycles = WEEKEND_FILL && !DRY ? 5 : 1
+  for (let cycle = 1; cycle <= maxCycles; cycle++) {
+    if (cycle > 1) log(`режим выходных: цикл ${cycle}`)
+    const generated = await main()
+    if (!generated) break
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(async (err) => {
-    log(`ERROR: ${err.message}`)
-    await api('/ai/notify', { text: `⚠️ Генератор черновиков не сработал: ${err.message.slice(0, 300)}` }).catch(() => {})
+  run().catch(async (err) => {
+    const { network, cause } = describeFailure(err)
+    log(`ERROR: ${cause}`)
+    let nextStep
+    if (network) {
+      const res = await scheduleRetry()
+      const at = res.match(/retry at (.+)/)
+      nextStep = at
+        ? `Повтор через 3 часа: ${at[1]}. Если ПК будет выключен — попытка пройдёт при ближайшем включении.`
+        : 'Сегодня уже поздно для повтора — следующая попытка завтра в 08:00.'
+    } else {
+      nextStep = 'Черновики не созданы. Можно запустить генератор вручную или попросить меня в боте.'
+    }
+    await api('/ai/notify', { text: `⚠️ Генератор черновиков не сработал.\nПричина: ${cause}.\n${nextStep}` }).catch(() => {})
     process.exit(1)
   })
 }

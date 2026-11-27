@@ -7,6 +7,7 @@ import gzip
 import html
 import re
 import sys
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -25,11 +26,19 @@ FEEDS = [
 
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"})
-    raw = urllib.request.urlopen(req, timeout=30).read()
-    if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-    return raw.decode("utf-8", "replace")
+    last = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"})
+            raw = urllib.request.urlopen(req, timeout=30).read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            return raw.decode("utf-8", "replace")
+        except Exception as e:
+            last = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def parse_date(s):
@@ -52,12 +61,14 @@ def strip(t):
     return html.unescape(re.sub(r"\s+", " ", t)).strip()
 
 
+net_errors = 0
 with open(out_path, "a", encoding="utf-8") as f:
     for label, url in FEEDS:
         try:
             root = ET.fromstring(fetch(url))
         except Exception as e:
-            print(label, "error:", e)
+            print(label, "error:", e, file=sys.stderr)
+            net_errors += 1
             continue
         ns = ""
         m = re.match(r"\{(.+)\}", root.tag)
@@ -95,3 +106,7 @@ with open(out_path, "a", encoding="utf-8") as f:
             text = title + ("\n" + desc if desc and desc != title else "")
             f.write(f"=== {when} | RSS | {link}\n{text}\n\n")
         print(label, len(posts))
+
+if net_errors == len(FEEDS):
+    print("all feeds failed (network)", file=sys.stderr)
+    sys.exit(2)

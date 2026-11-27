@@ -251,14 +251,23 @@ async function handleCommand(env: Env, chatId: number, text: string) {
         `#${post.id} [${post.status}] тип: ${post.type}\n` +
         `scheduled: ${formatMoment(post.scheduled_at)}\n\n${post.body}`
       const photo = post.photo_file_id || post.image_url
-      if (photo) {
+      if (photo && details.length <= 1024) {
         await tgApi(env, 'sendPhoto', {
           chat_id: chatId,
           photo,
-          caption: truncate(details, 1024),
+          caption: details,
         })
       } else {
-        await reply(env, chatId, truncate(details, 4096))
+        if (photo) {
+          await tgApi(env, 'sendPhoto', {
+            chat_id: chatId,
+            photo,
+            caption: `#${post.id} [${post.status}] тип: ${post.type} — картинка поста, полный текст ниже`,
+          })
+        }
+        for (const chunk of splitMessage(details)) {
+          await reply(env, chatId, chunk)
+        }
       }
       return
     }
