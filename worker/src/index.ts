@@ -102,6 +102,43 @@ async function deriveScene(env: Env, body: string) {
   return scene
 }
 
+async function approvePost(env: Env, id: number, chatId: number, announce = true) {
+  const sql = neon(env.NEON_DATABASE_URL)
+  await ensureSchema(sql)
+  const rows = await sql`SELECT id, body, type, image_prompt FROM posts WHERE id = ${id}`
+  if (rows.length === 0) return { ok: false, error: 'not found' }
+  const post = rows[0]
+  await sql`UPDATE posts SET status = 'approved', updated_at = NOW() WHERE id = ${id}`
+  if (announce) await reply(env, chatId, `Пост #${id} одобрен и поставлен в план. Генерирую картинку…`)
+  try {
+    const scene = post.image_prompt || (await deriveScene(env, post.body))
+    const { fileId, b64 } = await generatePhoto(
+      env,
+      chatId,
+      scene + IMAGE_STYLE,
+      `Картинка поста #${id} (одобрен, в плане)\nСцена: ${truncate(scene, 500)}\n\nНе нравится — /redo ${id} или /redo ${id} <своё описание>.`,
+    )
+    if (post.type === 'article') {
+      await sql`
+        UPDATE posts
+        SET image_b64 = ${b64}, image_url = ${`${PUBLIC_URL}/img/${id}`}, image_prompt = ${scene}, updated_at = NOW()
+        WHERE id = ${id}`
+    } else {
+      await sql`
+        UPDATE posts
+        SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
+        WHERE id = ${id}`
+    }
+    return { ok: true, imaged: true }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (announce) {
+      await reply(env, chatId, `Пост #${id} одобрен, но картинка не сгенерирована: ${truncate(message, 300)}\nПопробуй /redo ${id}. Без картинки пост выйдет текстом.`)
+    }
+    return { ok: true, imaged: false, error: message }
+  }
+}
+
 const app = new Hono<{ Bindings: Env }>()
 
 function tgApi(env: Env, method: string, payload: Record<string, unknown>) {
@@ -320,38 +357,8 @@ async function handleCommand(env: Env, chatId: number, text: string) {
         await reply(env, chatId, 'Использование: /approve <id>')
         return
       }
-      await ensureSchema(sql)
-      const rows = await sql`SELECT id, body, type, image_prompt FROM posts WHERE id = ${id}`
-      if (rows.length === 0) {
-        await reply(env, chatId, `Пост #${id} не найден.`)
-        return
-      }
-      const post = rows[0]
-      await sql`UPDATE posts SET status = 'approved', updated_at = NOW() WHERE id = ${id}`
-      await reply(env, chatId, `Пост #${id} одобрен и поставлен в план. Генерирую картинку…`)
-      try {
-        const scene = post.image_prompt || (await deriveScene(env, post.body))
-        const { fileId, b64 } = await generatePhoto(
-          env,
-          chatId,
-          scene + IMAGE_STYLE,
-          `Картинка поста #${id} (одобрен, в плане)\nСцена: ${truncate(scene, 500)}\n\nНе нравится — /redo ${id} или /redo ${id} <своё описание>.`,
-        )
-        if (post.type === 'article') {
-          await sql`
-            UPDATE posts
-            SET image_b64 = ${b64}, image_url = ${`${PUBLIC_URL}/img/${id}`}, image_prompt = ${scene}, updated_at = NOW()
-            WHERE id = ${id}`
-        } else {
-          await sql`
-            UPDATE posts
-            SET photo_file_id = ${fileId}, image_prompt = ${scene}, image_url = NULL, updated_at = NOW()
-            WHERE id = ${id}`
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        await reply(env, chatId, `Пост #${id} одобрен, но картинка не сгенерирована: ${truncate(message, 300)}\nПопробуй /redo ${id}. Без картинки пост выйдет текстом.`)
-      }
+      const res = await approvePost(env, id, chatId)
+      if (!res.ok) await reply(env, chatId, `Пост #${id} не найден.`)
       return
     }
 
@@ -524,6 +531,17 @@ app.post('/ai/reschedule', async (c) => {
         WHERE id = ${body.id} RETURNING id`
   if (rows.length === 0) return c.json({ error: 'not found' }, 404)
   return c.json({ ok: true, id: body.id, scheduled_at: date.toISOString(), ...(status ? { status } : {}) })
+})
+
+app.post('/ai/approve', async (c) => {
+  if (!agentAuthorized(c.req.header('Authorization'), c.env)) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  const body = await c.req.json<{ id?: number }>().catch(() => null)
+  const id = Number(body?.id)
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'id required' }, 400)
+  const res = await approvePost(c.env, id, Number(c.env.ADMIN_TELEGRAM_ID), false)
+  return c.json(res, res.ok ? 200 : 404)
 })
 
 app.post('/ai/notify', async (c) => {
